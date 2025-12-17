@@ -1,0 +1,31 @@
+{
+  "name": "lotto-ai",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:sandbox": "wrangler pages dev dist --d1=lotto-ai-production --local --ip 0.0.0.0 --port 3000",
+    "build": "vite build",
+    "preview": "wrangler pages dev dist --d1=lotto-ai-production --local",
+    "deploy": "npm run build && wrangler pages deploy dist",
+    "deploy:prod": "npm run build && wrangler pages deploy dist --project-name lotto-ai",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "db:migrate:local": "wrangler d1 migrations apply lotto-ai-production --local",
+    "db:migrate:prod": "wrangler d1 migrations apply lotto-ai-production",
+    "db:seed": "wrangler d1 execute lotto-ai-production --local --file=./seed.sql",
+    "db:reset": "rm -rf .wrangler/state/v3/d1 && npm run db:migrate:local && npm run db:seed",
+    "db:console:local": "wrangler d1 execute lotto-ai-production --local",
+    "db:console:prod": "wrangler d1 execute lotto-ai-production"
+  },
+  "dependencies": {
+    "@hono/vite-cloudflare-pages": "^0.4.3",
+    "hono": "^4.11.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251217.0",
+    "@hono/vite-build": "^1.2.0",
+    "@hono/vite-dev-server": "^0.18.2",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.1",
+    "wrangler": "^4.55.0"
+  }
+}
