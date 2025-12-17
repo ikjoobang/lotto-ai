@@ -694,12 +694,13 @@ app.post('/api/payment/complete', async (c) => {
     const now = new Date()
     const expiresAt = new Date(now.setMonth(now.getMonth() + payment.subscription_months))
     
-    await db.batch([
-      db.prepare('UPDATE payments SET status = ?, pg_tid = ?, completed_at = ? WHERE order_id = ?')
-        .bind('completed', pg_tid, new Date().toISOString(), order_id),
-      db.prepare('UPDATE users SET membership_type = ?, membership_expires_at = ? WHERE id = ?')
-        .bind('premium', expiresAt.toISOString(), payment.user_id)
-    ])
+    // Update payment status
+    await db.prepare('UPDATE payments SET status = ?, pg_tid = ?, completed_at = ? WHERE order_id = ?')
+      .bind('completed', pg_tid, new Date().toISOString(), order_id).run()
+    
+    // Update user membership
+    await db.prepare('UPDATE users SET membership_type = ?, membership_expires_at = ? WHERE id = ?')
+      .bind('premium', expiresAt.toISOString(), payment.user_id).run()
     
     return c.json({ success: true, membership_expires_at: expiresAt.toISOString() })
   } else {
