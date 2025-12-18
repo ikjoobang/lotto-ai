@@ -1490,6 +1490,9 @@ app.get('/', async (c) => {
             <span id="user-name" class="text-gray-300"></span>
             <span id="membership-badge" class="px-2 py-1 rounded text-xs font-bold"></span>
             <span id="view-count" class="text-sm text-gray-400"></span>
+            <a id="admin-link" href="/admin" class="hidden text-yellow-400 hover:text-yellow-300 transition" title="관리자">
+              <i class="fas fa-cog"></i>
+            </a>
             <button onclick="logout()" class="text-gray-400 hover:text-white transition">
               <i class="fas fa-sign-out-alt"></i>
             </button>
@@ -1764,6 +1767,7 @@ app.get('/', async (c) => {
               <li><a href="#" class="hover:text-yellow-400">이용약관</a></li>
               <li><a href="#" class="hover:text-yellow-400">개인정보처리방침</a></li>
               <li><a href="#" class="hover:text-yellow-400">문의하기</a></li>
+              <li><a href="/admin" class="hover:text-yellow-400">관리자</a></li>
             </ul>
           </div>
           <div>
@@ -1989,6 +1993,7 @@ app.get('/', async (c) => {
           membershipBadge.textContent = 'ADMIN';
           membershipBadge.className = 'px-2 py-1 rounded text-xs font-bold bg-red-500 text-white';
           viewCount.textContent = '';
+          document.getElementById('admin-link').classList.remove('hidden');
         } else if (isPartner) {
           membershipBadge.textContent = '제휴';
           membershipBadge.className = 'px-2 py-1 rounded text-xs font-bold partner-badge text-white';
