@@ -17,7 +17,7 @@ type Variables = {
     email: string
     name: string
     phone: string | null
-    membership_type: string
+    subscription_type: string
     agreed_to_third_party: number
     weekly_view_limit: number
     current_view_count: number
@@ -174,7 +174,7 @@ const authMiddleware = async (c: any, next: any) => {
   if (payload && payload.userId) {
     const db = c.env.DB
     const user = await db.prepare(`
-      SELECT id, email, name, phone, membership_type, 
+      SELECT id, email, name, phone, subscription_type, 
              agreed_to_third_party, weekly_view_limit, current_view_count 
       FROM users WHERE id = ?
     `).bind(payload.userId).first()
@@ -229,7 +229,7 @@ app.post('/api/auth/register', async (c) => {
     const agreedAt = agreedToThirdParty ? now : null
     
     const result = await db.prepare(`
-      INSERT INTO users (email, password_hash, name, phone, membership_type, 
+      INSERT INTO users (email, password_hash, name, phone, subscription_type, 
                          agreed_to_third_party, weekly_view_limit, current_view_count, agreed_at, last_reset_at) 
       VALUES (?, ?, ?, ?, 'free', ?, ?, 0, ?, ?)
     `).bind(email, passwordHash, name, phone || null, agreedValue, weeklyLimit, agreedAt, now).run()
@@ -260,7 +260,7 @@ app.post('/api/auth/register', async (c) => {
       user: { 
         email, 
         name, 
-        membership_type: agreedToThirdParty ? 'partner' : 'basic',
+        subscription_type: agreedToThirdParty ? 'partner' : 'basic',
         weekly_view_limit: weeklyLimit,
         current_view_count: 0,
         agreed_to_third_party: agreedValue
@@ -282,7 +282,7 @@ app.post('/api/auth/login', async (c) => {
     
     const db = c.env.DB
     const user = await db.prepare(`
-      SELECT id, email, name, phone, password_hash, membership_type, 
+      SELECT id, email, name, phone, password_hash, subscription_type, 
              agreed_to_third_party, weekly_view_limit, current_view_count 
       FROM users WHERE email = ?
     `).bind(email).first() as any
@@ -312,7 +312,7 @@ app.post('/api/auth/login', async (c) => {
       user: {
         email: user.email,
         name: user.name,
-        membership_type: user.agreed_to_third_party ? 'partner' : 'basic',
+        subscription_type: user.agreed_to_third_party ? 'partner' : 'basic',
         weekly_view_limit: user.weekly_view_limit || 5,
         current_view_count: user.current_view_count || 0,
         agreed_to_third_party: user.agreed_to_third_party || 0
@@ -338,7 +338,7 @@ app.get('/api/auth/me', async (c) => {
   return c.json({ 
     user: {
       ...user,
-      membership_type: user.agreed_to_third_party ? 'partner' : 'basic',
+      subscription_type: user.agreed_to_third_party ? 'partner' : 'basic',
       remaining_views: (user.weekly_view_limit || 5) - (user.current_view_count || 0)
     }
   })
@@ -495,7 +495,7 @@ app.get('/api/predictions', async (c) => {
     weeklyLimit = user.weekly_view_limit || 5
     currentCount = user.current_view_count || 0
     isPartner = user.agreed_to_third_party === 1
-    isAdmin = user.membership_type === 'admin'
+    isAdmin = user.subscription_type === 'admin'
   }
   
   const remainingViews = Math.max(0, weeklyLimit - currentCount)
@@ -557,7 +557,7 @@ app.get('/api/predictions', async (c) => {
     round_number: targetRound,
     predictions: formattedPredictions,
     user_info: user ? {
-      membership_type: isAdmin ? 'admin' : (isPartner ? 'partner' : 'basic'),
+      subscription_type: isAdmin ? 'admin' : (isPartner ? 'partner' : 'basic'),
       weekly_limit: weeklyLimit,
       current_count: currentCount,
       remaining_views: remainingViews
@@ -574,7 +574,7 @@ app.post('/api/predictions/view', async (c) => {
   }
   
   // 관리자는 제한 없음
-  if (user.membership_type === 'admin') {
+  if (user.subscription_type === 'admin') {
     return c.json({ success: true, remaining: 999 })
   }
   
@@ -629,7 +629,7 @@ app.post('/api/admin/generate-predictions', async (c) => {
   const user = c.get('user')
   
   // Admin check
-  if (!user || user.membership_type !== 'admin') {
+  if (!user || user.subscription_type !== 'admin') {
     return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
   }
   
@@ -755,7 +755,7 @@ app.post('/api/admin/generate-predictions', async (c) => {
 app.post('/api/admin/update-results', async (c) => {
   const user = c.get('user')
   
-  if (!user || user.membership_type !== 'admin') {
+  if (!user || user.subscription_type !== 'admin') {
     return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
   }
   
@@ -801,7 +801,7 @@ app.post('/api/admin/weekly-reset', async (c) => {
   const resetKey = c.req.header('X-Reset-Key')
   const adminResetKey = c.env.ADMIN_RESET_KEY || 'lotto-weekly-reset-2024'
   
-  if ((!user || user.membership_type !== 'admin') && resetKey !== adminResetKey) {
+  if ((!user || user.subscription_type !== 'admin') && resetKey !== adminResetKey) {
     return c.json({ error: '권한이 없습니다.' }, 403)
   }
   
@@ -829,7 +829,7 @@ app.post('/api/admin/weekly-reset', async (c) => {
 app.get('/api/admin/leads', async (c) => {
   const user = c.get('user')
   
-  if (!user || user.membership_type !== 'admin') {
+  if (!user || user.subscription_type !== 'admin') {
     return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
   }
   
@@ -855,7 +855,7 @@ app.get('/api/admin/leads', async (c) => {
 app.get('/api/admin/leads/export', async (c) => {
   const user = c.get('user')
   
-  if (!user || user.membership_type !== 'admin') {
+  if (!user || user.subscription_type !== 'admin') {
     return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
   }
   
@@ -897,7 +897,7 @@ app.get('/api/admin/leads/export', async (c) => {
 app.get('/api/admin/leads/stats', async (c) => {
   const user = c.get('user')
   
-  if (!user || user.membership_type !== 'admin') {
+  if (!user || user.subscription_type !== 'admin') {
     return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
   }
   
@@ -932,7 +932,7 @@ app.get('/api/admin/leads/stats', async (c) => {
 app.post('/api/admin/fetch-draws', async (c) => {
   const user = c.get('user')
   
-  if (!user || user.membership_type !== 'admin') {
+  if (!user || user.subscription_type !== 'admin') {
     return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
   }
   
@@ -993,7 +993,7 @@ app.get('/api/predictions/download', async (c) => {
     'SELECT * FROM predictions WHERE round_number = ? ORDER BY set_index'
   ).bind(targetRound).all()
   
-  const isAdmin = user && user.membership_type === 'admin'
+  const isAdmin = user && user.subscription_type === 'admin'
   const isPartner = user && user.agreed_to_third_party === 1
   const weeklyLimit = user ? (user.weekly_view_limit || 5) : 5
   
@@ -1650,7 +1650,7 @@ app.get('*', async (c) => {
         userName.textContent = currentUser.name;
         
         const isPartner = currentUser.agreed_to_third_party === 1;
-        const isAdmin = currentUser.membership_type === 'admin';
+        const isAdmin = currentUser.subscription_type === 'admin';
         
         if (isAdmin) {
           membershipBadge.textContent = 'ADMIN';
@@ -1831,9 +1831,9 @@ app.get('*', async (c) => {
         // 열람 상태 표시
         if (data.user_info) {
           const info = data.user_info;
-          if (info.membership_type === 'admin') {
+          if (info.subscription_type === 'admin') {
             viewStatus.innerHTML = '<span class="text-red-400">관리자 모드 - 모든 번호 열람 가능</span>';
-          } else if (info.membership_type === 'partner') {
+          } else if (info.subscription_type === 'partner') {
             viewStatus.innerHTML = '<span class="text-green-400">제휴 회원</span> - ' + info.weekly_limit + '게임 열람 가능 (남은 횟수: ' + info.remaining_views + ')';
           } else {
             viewStatus.innerHTML = '<span class="text-gray-400">일반 회원</span> - ' + info.weekly_limit + '게임 열람 가능 <a href="#benefits" class="text-green-400 hover:underline">(업그레이드하면 20게임!)</a>';
