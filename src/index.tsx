@@ -1188,7 +1188,7 @@ app.get('*', async (c) => {
             <span class="text-white">AI가 분석한 로또 번호</span>
           </h1>
           <p class="text-xl text-gray-400 mb-8 max-w-2xl mx-auto">
-            일본 로또 명인의 분석법과 Google Gemini AI의 추론을 결합한<br>
+            일본 로또 명인의 분석법과 AI의 추론을 결합한<br>
             데이터 기반 로또 번호 추천 서비스
           </p>
           
@@ -1242,7 +1242,7 @@ app.get('*', async (c) => {
             <i class="fas fa-robot text-yellow-400 mr-2"></i>
             <span id="prediction-round">1151</span>회 AI 추천 번호
           </h2>
-          <p class="text-gray-400">후나츠 사카이 알고리즘 + Gemini AI 분석</p>
+          <p class="text-gray-400">후나츠 사카이 알고리즘 + AI 분석</p>
           <div id="view-status" class="mt-4 text-sm text-gray-400"></div>
         </div>
         
