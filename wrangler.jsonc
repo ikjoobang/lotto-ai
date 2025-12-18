@@ -5,20 +5,14 @@
   "pages_build_output_dir": "./dist",
   "compatibility_flags": ["nodejs_compat"],
   
-  // D1 Database
+  // D1 Database (using existing webapp-production database)
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "lotto-ai-production",
-      "database_id": "placeholder-id"
+      "database_name": "webapp-production",
+      "database_id": "8805fe70-936c-4e83-bb3f-9884ccc0c9ed"
     }
-  ],
-
-  // Environment variables (will be set via wrangler secret)
-  "vars": {
-    "GEMINI_API_KEY": "AIzaSyAZjvD4bM-c6klrcrnFCpiBLSoSz_goPQ4",
-    "JWT_SECRET": "lotto-ai-secret-key-2024",
-    "INICIS_MID": "MOI9559449",
-    "INICIS_SIGN_KEY": "bDJKcjZ2QkkwZjFHcXZ0MFJEMGZYQT09"
-  }
+  ]
+  
+  // Environment variables are set via wrangler pages secret
 }

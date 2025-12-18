@@ -8,8 +8,7 @@ type Bindings = {
   DB: D1Database
   GEMINI_API_KEY: string
   JWT_SECRET: string
-  INICIS_MID: string
-  INICIS_SIGN_KEY: string
+  ADMIN_RESET_KEY: string  // 주간 리셋용 시크릿 키
 }
 
 type Variables = {
@@ -17,8 +16,11 @@ type Variables = {
     id: number
     email: string
     name: string
+    phone: string | null
     membership_type: string
-    membership_expires_at: string | null
+    agreed_to_third_party: number
+    weekly_view_limit: number
+    current_view_count: number
   }
 }
 
@@ -171,21 +173,13 @@ const authMiddleware = async (c: any, next: any) => {
   
   if (payload && payload.userId) {
     const db = c.env.DB
-    const user = await db.prepare('SELECT id, email, name, membership_type, membership_expires_at FROM users WHERE id = ?')
-      .bind(payload.userId)
-      .first()
+    const user = await db.prepare(`
+      SELECT id, email, name, phone, membership_type, 
+             agreed_to_third_party, weekly_view_limit, current_view_count 
+      FROM users WHERE id = ?
+    `).bind(payload.userId).first()
     
     if (user) {
-      // Check if premium membership expired
-      if (user.membership_type === 'premium' && user.membership_expires_at) {
-        const expiresAt = new Date(user.membership_expires_at)
-        if (expiresAt < new Date()) {
-          await db.prepare('UPDATE users SET membership_type = ? WHERE id = ?')
-            .bind('free', user.id)
-            .run()
-          user.membership_type = 'free'
-        }
-      }
       c.set('user', user)
     }
   }
@@ -202,17 +196,17 @@ app.use('/api/*', authMiddleware)
 
 // Health check
 app.get('/api/health', (c) => {
-  return c.json({ status: 'ok', timestamp: new Date().toISOString() })
+  return c.json({ status: 'ok', timestamp: new Date().toISOString(), version: '2.0-lead-gen' })
 })
 
 // ============================
 // Auth Routes
 // ============================
 
-// Register
+// Register (회원가입 - 제3자 동의 포함)
 app.post('/api/auth/register', async (c) => {
   try {
-    const { email, password, name, phone } = await c.req.json()
+    const { email, password, name, phone, agreedToThirdParty } = await c.req.json()
     
     if (!email || !password || !name) {
       return c.json({ error: '이메일, 비밀번호, 이름은 필수입니다.' }, 400)
@@ -227,13 +221,31 @@ app.post('/api/auth/register', async (c) => {
     }
     
     const passwordHash = await hashPassword(password)
+    const now = new Date().toISOString()
     
-    const result = await db.prepare(
-      'INSERT INTO users (email, password_hash, name, phone) VALUES (?, ?, ?, ?)'
-    ).bind(email, passwordHash, name, phone || null).run()
+    // 제3자 동의 시 weekly_view_limit = 20, 아니면 5
+    const weeklyLimit = agreedToThirdParty ? 20 : 5
+    const agreedValue = agreedToThirdParty ? 1 : 0
+    const agreedAt = agreedToThirdParty ? now : null
+    
+    const result = await db.prepare(`
+      INSERT INTO users (email, password_hash, name, phone, membership_type, 
+                         agreed_to_third_party, weekly_view_limit, current_view_count, agreed_at, last_reset_at) 
+      VALUES (?, ?, ?, ?, 'free', ?, ?, 0, ?, ?)
+    `).bind(email, passwordHash, name, phone || null, agreedValue, weeklyLimit, agreedAt, now).run()
+    
+    const userId = result.meta.last_row_id
+    
+    // 제3자 동의 시 partner_leads 테이블에 추가
+    if (agreedToThirdParty && phone) {
+      await db.prepare(`
+        INSERT INTO partner_leads (user_id, name, phone, email, agreed_at) 
+        VALUES (?, ?, ?, ?, ?)
+      `).bind(userId, name, phone, email, now).run()
+    }
     
     const jwtSecret = c.env.JWT_SECRET || 'lotto-ai-secret-key-2024'
-    const token = await createToken({ userId: result.meta.last_row_id }, jwtSecret)
+    const token = await createToken({ userId }, jwtSecret)
     
     setCookie(c, 'auth_token', token, {
       httpOnly: true,
@@ -245,7 +257,14 @@ app.post('/api/auth/register', async (c) => {
     return c.json({ 
       success: true, 
       token,
-      user: { email, name, membership_type: 'free' }
+      user: { 
+        email, 
+        name, 
+        membership_type: agreedToThirdParty ? 'partner' : 'basic',
+        weekly_view_limit: weeklyLimit,
+        current_view_count: 0,
+        agreed_to_third_party: agreedValue
+      }
     })
   } catch (error: any) {
     return c.json({ error: error.message }, 500)
@@ -262,9 +281,11 @@ app.post('/api/auth/login', async (c) => {
     }
     
     const db = c.env.DB
-    const user = await db.prepare(
-      'SELECT id, email, name, password_hash, membership_type, membership_expires_at FROM users WHERE email = ?'
-    ).bind(email).first() as any
+    const user = await db.prepare(`
+      SELECT id, email, name, phone, password_hash, membership_type, 
+             agreed_to_third_party, weekly_view_limit, current_view_count 
+      FROM users WHERE email = ?
+    `).bind(email).first() as any
     
     if (!user) {
       return c.json({ error: '이메일 또는 비밀번호가 일치하지 않습니다.' }, 401)
@@ -291,8 +312,10 @@ app.post('/api/auth/login', async (c) => {
       user: {
         email: user.email,
         name: user.name,
-        membership_type: user.membership_type,
-        membership_expires_at: user.membership_expires_at
+        membership_type: user.agreed_to_third_party ? 'partner' : 'basic',
+        weekly_view_limit: user.weekly_view_limit || 5,
+        current_view_count: user.current_view_count || 0,
+        agreed_to_third_party: user.agreed_to_third_party || 0
       }
     })
   } catch (error: any) {
@@ -312,7 +335,62 @@ app.get('/api/auth/me', async (c) => {
   if (!user) {
     return c.json({ error: '로그인이 필요합니다.' }, 401)
   }
-  return c.json({ user })
+  return c.json({ 
+    user: {
+      ...user,
+      membership_type: user.agreed_to_third_party ? 'partner' : 'basic',
+      remaining_views: (user.weekly_view_limit || 5) - (user.current_view_count || 0)
+    }
+  })
+})
+
+// ============================
+// 제3자 동의 업그레이드 API
+// ============================
+app.post('/api/auth/agree-partner', async (c) => {
+  const user = c.get('user')
+  
+  if (!user) {
+    return c.json({ error: '로그인이 필요합니다.' }, 401)
+  }
+  
+  if (user.agreed_to_third_party) {
+    return c.json({ error: '이미 제휴 회원입니다.' }, 400)
+  }
+  
+  const { phone } = await c.req.json()
+  
+  if (!phone) {
+    return c.json({ error: '연락처는 필수입니다.' }, 400)
+  }
+  
+  const db = c.env.DB
+  const now = new Date().toISOString()
+  
+  // 유저 정보 업데이트 (5 → 20 게임)
+  await db.prepare(`
+    UPDATE users 
+    SET agreed_to_third_party = 1, 
+        weekly_view_limit = 20, 
+        phone = ?,
+        agreed_at = ?
+    WHERE id = ?
+  `).bind(phone, now, user.id).run()
+  
+  // 현재 유저 이메일/이름 조회
+  const userData = await db.prepare('SELECT email, name FROM users WHERE id = ?').bind(user.id).first() as any
+  
+  // partner_leads 테이블에 추가
+  await db.prepare(`
+    INSERT OR REPLACE INTO partner_leads (user_id, name, phone, email, agreed_at) 
+    VALUES (?, ?, ?, ?, ?)
+  `).bind(user.id, userData.name, phone, userData.email, now).run()
+  
+  return c.json({ 
+    success: true, 
+    message: '제휴 회원으로 업그레이드 되었습니다! 매주 20게임을 무료로 열람할 수 있습니다.',
+    weekly_view_limit: 20
+  })
 })
 
 // ============================
@@ -388,7 +466,7 @@ app.get('/api/lotto/analysis', async (c) => {
 })
 
 // ============================
-// Predictions Routes
+// Predictions Routes (열람 횟수 제한 적용)
 // ============================
 
 // Get predictions for current round
@@ -407,35 +485,119 @@ app.get('/api/predictions', async (c) => {
     'SELECT id, round_number, set_index, num1, num2, num3, num4, num5, num6, is_vip, ai_comment, matched_count, rank FROM predictions WHERE round_number = ? ORDER BY set_index'
   ).bind(targetRound).all()
   
-  // Freemium logic: non-premium users can only see 1 prediction
-  const isPremium = user && (user.membership_type === 'premium' || user.membership_type === 'admin')
+  // 비로그인 또는 열람 정보
+  let weeklyLimit = 5
+  let currentCount = 0
+  let isPartner = false
+  let isAdmin = false
+  
+  if (user) {
+    weeklyLimit = user.weekly_view_limit || 5
+    currentCount = user.current_view_count || 0
+    isPartner = user.agreed_to_third_party === 1
+    isAdmin = user.membership_type === 'admin'
+  }
+  
+  const remainingViews = Math.max(0, weeklyLimit - currentCount)
   
   const formattedPredictions = predictions.results.map((pred: any, index: number) => {
-    const isLocked = !isPremium && pred.is_vip === 1
+    // 관리자는 모두 볼 수 있음
+    if (isAdmin) {
+      return {
+        id: pred.id,
+        set_index: pred.set_index,
+        numbers: [pred.num1, pred.num2, pred.num3, pred.num4, pred.num5, pred.num6],
+        locked: false,
+        ai_comment: pred.ai_comment
+      }
+    }
     
-    if (isLocked) {
+    // 비로그인은 첫 번째만 무료
+    if (!user) {
+      if (index === 0) {
+        return {
+          id: pred.id,
+          set_index: pred.set_index,
+          numbers: [pred.num1, pred.num2, pred.num3, pred.num4, pred.num5, pred.num6],
+          locked: false,
+          ai_comment: pred.ai_comment
+        }
+      }
       return {
         id: pred.id,
         set_index: pred.set_index,
         numbers: ['?', '?', '?', '?', '?', '?'],
         locked: true,
-        ai_comment: '🔒 유료 회원 전용'
+        ai_comment: '🔒 회원가입 후 열람 가능'
+      }
+    }
+    
+    // 로그인 회원: 열람 한도 내에서 표시
+    // set_index가 weeklyLimit 이하인 것만 표시
+    if (pred.set_index <= weeklyLimit) {
+      return {
+        id: pred.id,
+        set_index: pred.set_index,
+        numbers: [pred.num1, pred.num2, pred.num3, pred.num4, pred.num5, pred.num6],
+        locked: false,
+        ai_comment: pred.ai_comment
       }
     }
     
     return {
       id: pred.id,
       set_index: pred.set_index,
-      numbers: [pred.num1, pred.num2, pred.num3, pred.num4, pred.num5, pred.num6],
-      locked: false,
-      ai_comment: pred.ai_comment
+      numbers: ['?', '?', '?', '?', '?', '?'],
+      locked: true,
+      ai_comment: isPartner ? '🔒 이번 주 열람 한도 초과' : '🔒 제휴 회원 전용 (20게임)'
     }
   })
   
   return c.json({
     round_number: targetRound,
     predictions: formattedPredictions,
-    user_type: user?.membership_type || 'guest'
+    user_info: user ? {
+      membership_type: isAdmin ? 'admin' : (isPartner ? 'partner' : 'basic'),
+      weekly_limit: weeklyLimit,
+      current_count: currentCount,
+      remaining_views: remainingViews
+    } : null
+  })
+})
+
+// 예측 번호 열람 (카운트 증가)
+app.post('/api/predictions/view', async (c) => {
+  const user = c.get('user')
+  
+  if (!user) {
+    return c.json({ error: '로그인이 필요합니다.' }, 401)
+  }
+  
+  // 관리자는 제한 없음
+  if (user.membership_type === 'admin') {
+    return c.json({ success: true, remaining: 999 })
+  }
+  
+  const weeklyLimit = user.weekly_view_limit || 5
+  const currentCount = user.current_view_count || 0
+  
+  if (currentCount >= weeklyLimit) {
+    return c.json({ 
+      error: '이번 주 무료 열람 횟수를 모두 소진했습니다. 일요일 06:00에 초기화됩니다.',
+      upgrade_available: !user.agreed_to_third_party
+    }, 429)
+  }
+  
+  const db = c.env.DB
+  const newCount = currentCount + 1
+  
+  await db.prepare('UPDATE users SET current_view_count = ? WHERE id = ?')
+    .bind(newCount, user.id).run()
+  
+  return c.json({ 
+    success: true, 
+    current_count: newCount,
+    remaining: weeklyLimit - newCount
   })
 })
 
@@ -503,7 +665,7 @@ app.post('/api/admin/generate-predictions', async (c) => {
     ).first() as any
     const targetRound = latestDraw ? latestDraw.round_number + 1 : 1151
     
-    // Call Gemini API
+    // Call Gemini API - 20게임 생성
     const prompt = `당신은 로또 분석 전문가입니다. '후나츠 사카이' 분석법에 따라 다음 주 로또 번호를 예측해 주세요.
 
 [분석 데이터]
@@ -515,17 +677,14 @@ app.post('/api/admin/generate-predictions', async (c) => {
 - 위 '후보 번호' 중에서 4~5개를 선택하세요.
 - '이월수 후보' 중에서 반드시 1개를 포함하세요.
 - 총 6개의 숫자를 1~45 범위에서 선택하세요.
-- 서로 다른 조합 5세트를 생성하세요.
+- 서로 다른 조합 20세트를 생성하세요.
 - 각 조합에 대한 간단한 분석 코멘트를 한국어로 작성하세요.
 
 반드시 다음 JSON 형식으로만 응답하세요:
 {
   "predictions": [
     { "numbers": [1, 2, 3, 4, 5, 6], "comment": "분석 코멘트" },
-    { "numbers": [7, 8, 9, 10, 11, 12], "comment": "분석 코멘트" },
-    { "numbers": [13, 14, 15, 16, 17, 18], "comment": "분석 코멘트" },
-    { "numbers": [19, 20, 21, 22, 23, 24], "comment": "분석 코멘트" },
-    { "numbers": [25, 26, 27, 28, 29, 30], "comment": "분석 코멘트" }
+    ... (총 20개)
   ]
 }`
 
@@ -538,7 +697,7 @@ app.post('/api/admin/generate-predictions', async (c) => {
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
             temperature: 0.7,
-            maxOutputTokens: 1024
+            maxOutputTokens: 4096
           }
         })
       }
@@ -569,20 +728,23 @@ app.post('/api/admin/generate-predictions', async (c) => {
     // Delete existing predictions for this round
     await db.prepare('DELETE FROM predictions WHERE round_number = ?').bind(targetRound).run()
     
-    // Insert new predictions
-    for (let i = 0; i < predictions.length; i++) {
+    // Insert new predictions (20개)
+    for (let i = 0; i < Math.min(predictions.length, 20); i++) {
       const pred = predictions[i]
       const nums = pred.numbers.sort((a: number, b: number) => a - b)
       
+      // is_vip: 1~5번은 기본회원용(0), 6~20번은 제휴회원용(1)
+      const isVip = i >= 5 ? 1 : 0
+      
       await db.prepare(
         'INSERT INTO predictions (round_number, set_index, num1, num2, num3, num4, num5, num6, is_vip, ai_comment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-      ).bind(targetRound, i + 1, nums[0], nums[1], nums[2], nums[3], nums[4], nums[5], i > 0 ? 1 : 0, pred.comment).run()
+      ).bind(targetRound, i + 1, nums[0], nums[1], nums[2], nums[3], nums[4], nums[5], isVip, pred.comment).run()
     }
     
     return c.json({ 
       success: true, 
       round_number: targetRound,
-      predictions_count: predictions.length 
+      predictions_count: Math.min(predictions.length, 20)
     })
   } catch (error: any) {
     return c.json({ error: error.message }, 500)
@@ -631,84 +793,135 @@ app.post('/api/admin/update-results', async (c) => {
 })
 
 // ============================
-// Payment Routes (KG이니시스)
+// 주간 리셋 API (매주 일요일 06:00 - Cron Job에서 호출)
 // ============================
-
-// Initialize payment
-app.post('/api/payment/init', async (c) => {
+app.post('/api/admin/weekly-reset', async (c) => {
+  // 관리자 인증 또는 시크릿 키 확인
   const user = c.get('user')
+  const resetKey = c.req.header('X-Reset-Key')
+  const adminResetKey = c.env.ADMIN_RESET_KEY || 'lotto-weekly-reset-2024'
   
-  if (!user) {
-    return c.json({ error: '로그인이 필요합니다.' }, 401)
+  if ((!user || user.membership_type !== 'admin') && resetKey !== adminResetKey) {
+    return c.json({ error: '권한이 없습니다.' }, 403)
   }
   
-  const { months = 1 } = await c.req.json()
-  const amount = months * 9900 // 월 9,900원
+  const db = c.env.DB
+  const now = new Date().toISOString()
+  
+  // 모든 유저의 current_view_count를 0으로 리셋
+  const result = await db.prepare(`
+    UPDATE users SET current_view_count = 0, last_reset_at = ?
+  `).bind(now).run()
+  
+  return c.json({ 
+    success: true, 
+    message: '모든 유저의 열람 횟수가 초기화되었습니다.',
+    reset_at: now,
+    affected_rows: result.meta.changes
+  })
+})
+
+// ============================
+// 관리자용 Partner Leads API
+// ============================
+
+// 리드 목록 조회
+app.get('/api/admin/leads', async (c) => {
+  const user = c.get('user')
+  
+  if (!user || user.membership_type !== 'admin') {
+    return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  }
   
   const db = c.env.DB
-  const orderId = `LOTTO${Date.now()}${Math.random().toString(36).substr(2, 9)}`
+  const exported = c.req.query('exported') // 'true', 'false', or undefined
   
-  await db.prepare(
-    'INSERT INTO payments (user_id, order_id, amount, subscription_months, status) VALUES (?, ?, ?, ?, ?)'
-  ).bind(user.id, orderId, amount, months, 'pending').run()
+  let query = 'SELECT * FROM partner_leads ORDER BY agreed_at DESC'
+  if (exported === 'true') {
+    query = 'SELECT * FROM partner_leads WHERE exported = 1 ORDER BY agreed_at DESC'
+  } else if (exported === 'false') {
+    query = 'SELECT * FROM partner_leads WHERE exported = 0 ORDER BY agreed_at DESC'
+  }
   
-  // KG이니시스 결제 설정
-  const mid = c.env.INICIS_MID || 'MOI9559449'
-  const timestamp = Date.now().toString()
+  const leads = await db.prepare(query).all()
   
-  return c.json({
-    success: true,
-    order_id: orderId,
-    amount,
-    months,
-    pg_config: {
-      mid,
-      order_id: orderId,
-      amount,
-      goods_name: `LOTTO AI ${months}개월 이용권`,
-      buyer_name: user.name,
-      buyer_email: user.email,
-      timestamp
+  return c.json({ 
+    leads: leads.results,
+    total: leads.results.length
+  })
+})
+
+// 리드 CSV 추출
+app.get('/api/admin/leads/export', async (c) => {
+  const user = c.get('user')
+  
+  if (!user || user.membership_type !== 'admin') {
+    return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  }
+  
+  const db = c.env.DB
+  const now = new Date().toISOString()
+  
+  // 미추출 리드만 가져오기
+  const leads = await db.prepare(
+    'SELECT id, name, phone, email, agreed_at FROM partner_leads WHERE exported = 0 ORDER BY agreed_at DESC'
+  ).all()
+  
+  if (leads.results.length === 0) {
+    return c.json({ error: '추출할 새 리드가 없습니다.' }, 404)
+  }
+  
+  // CSV 생성
+  const csvHeader = '이름,연락처,이메일,동의일시\n'
+  const csvRows = leads.results.map((lead: any) => 
+    `"${lead.name}","${lead.phone || ''}","${lead.email}","${lead.agreed_at}"`
+  ).join('\n')
+  const csv = '\uFEFF' + csvHeader + csvRows // BOM for Excel UTF-8
+  
+  // 추출 완료 마킹
+  const ids = leads.results.map((lead: any) => lead.id)
+  for (const id of ids) {
+    await db.prepare('UPDATE partner_leads SET exported = 1, exported_at = ? WHERE id = ?')
+      .bind(now, id).run()
+  }
+  
+  return new Response(csv, {
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="partner_leads_${new Date().toISOString().split('T')[0]}.csv"`
     }
   })
 })
 
-// Payment complete callback
-app.post('/api/payment/complete', async (c) => {
+// 리드 통계
+app.get('/api/admin/leads/stats', async (c) => {
+  const user = c.get('user')
+  
+  if (!user || user.membership_type !== 'admin') {
+    return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  }
+  
   const db = c.env.DB
-  const { order_id, pg_tid, status } = await c.req.json()
   
-  if (!order_id) {
-    return c.json({ error: '주문 ID가 필요합니다.' }, 400)
-  }
+  const total = await db.prepare('SELECT COUNT(*) as count FROM partner_leads').first() as any
+  const notExported = await db.prepare('SELECT COUNT(*) as count FROM partner_leads WHERE exported = 0').first() as any
+  const exported = await db.prepare('SELECT COUNT(*) as count FROM partner_leads WHERE exported = 1').first() as any
   
-  const payment = await db.prepare(
-    'SELECT * FROM payments WHERE order_id = ?'
-  ).bind(order_id).first() as any
+  // 이번 주 신규
+  const weekStart = new Date()
+  weekStart.setDate(weekStart.getDate() - weekStart.getDay())
+  weekStart.setHours(0, 0, 0, 0)
   
-  if (!payment) {
-    return c.json({ error: '결제 정보를 찾을 수 없습니다.' }, 404)
-  }
+  const thisWeek = await db.prepare(
+    'SELECT COUNT(*) as count FROM partner_leads WHERE agreed_at >= ?'
+  ).bind(weekStart.toISOString()).first() as any
   
-  if (status === 'success') {
-    const now = new Date()
-    const expiresAt = new Date(now.setMonth(now.getMonth() + payment.subscription_months))
-    
-    // Update payment status
-    await db.prepare('UPDATE payments SET status = ?, pg_tid = ?, completed_at = ? WHERE order_id = ?')
-      .bind('completed', pg_tid, new Date().toISOString(), order_id).run()
-    
-    // Update user membership
-    await db.prepare('UPDATE users SET membership_type = ?, membership_expires_at = ? WHERE id = ?')
-      .bind('premium', expiresAt.toISOString(), payment.user_id).run()
-    
-    return c.json({ success: true, membership_expires_at: expiresAt.toISOString() })
-  } else {
-    await db.prepare('UPDATE payments SET status = ? WHERE order_id = ?')
-      .bind('failed', order_id).run()
-    
-    return c.json({ success: false, error: '결제에 실패했습니다.' })
-  }
+  return c.json({
+    total: total.count,
+    not_exported: notExported.count,
+    exported: exported.count,
+    this_week: thisWeek.count
+  })
 })
 
 // ============================
@@ -780,7 +993,9 @@ app.get('/api/predictions/download', async (c) => {
     'SELECT * FROM predictions WHERE round_number = ? ORDER BY set_index'
   ).bind(targetRound).all()
   
-  const isPremium = user && (user.membership_type === 'premium' || user.membership_type === 'admin')
+  const isAdmin = user && user.membership_type === 'admin'
+  const isPartner = user && user.agreed_to_third_party === 1
+  const weeklyLimit = user ? (user.weekly_view_limit || 5) : 5
   
   let content = `===========================================\n`
   content += `    LOTTO AI - ${targetRound}회 추천 번호\n`
@@ -788,10 +1003,10 @@ app.get('/api/predictions/download', async (c) => {
   content += `===========================================\n\n`
   
   for (const pred of predictions.results as any[]) {
-    const isLocked = !isPremium && pred.is_vip === 1
+    const canView = isAdmin || pred.set_index <= weeklyLimit
     
-    if (isLocked) {
-      content += `[조합 ${pred.set_index}] 🔒 유료 회원 전용\n\n`
+    if (!canView) {
+      content += `[조합 ${pred.set_index}] 🔒 ${isPartner ? '열람 한도 초과' : '제휴 회원 전용'}\n\n`
     } else {
       content += `[조합 ${pred.set_index}]\n`
       content += `번호: ${pred.num1} - ${pred.num2} - ${pred.num3} - ${pred.num4} - ${pred.num5} - ${pred.num6}\n`
@@ -800,6 +1015,7 @@ app.get('/api/predictions/download', async (c) => {
   }
   
   content += `\n-------------------------------------------\n`
+  content += `회원 등급: ${isAdmin ? '관리자' : (isPartner ? '제휴회원 (20게임)' : '일반회원 (5게임)')}\n`
   content += `※ 본 서비스는 참고용이며, 당첨을 보장하지 않습니다.\n`
   content += `※ 도박 중독 상담: 1336\n`
   
@@ -812,7 +1028,7 @@ app.get('/api/predictions/download', async (c) => {
 })
 
 // ============================
-// Frontend HTML
+// Frontend HTML (새 비즈니스 모델 반영)
 // ============================
 
 app.get('*', async (c) => {
@@ -908,6 +1124,10 @@ app.get('*', async (c) => {
     
     .scrollbar-hide::-webkit-scrollbar { display: none; }
     .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+    
+    .partner-badge {
+      background: linear-gradient(90deg, #10b981, #059669);
+    }
   </style>
 </head>
 <body class="text-white">
@@ -925,7 +1145,7 @@ app.get('*', async (c) => {
             <a href="#predictions" class="text-gray-300 hover:text-yellow-400 transition">AI 추천</a>
             <a href="#analysis" class="text-gray-300 hover:text-yellow-400 transition">분석</a>
             <a href="#results" class="text-gray-300 hover:text-yellow-400 transition">적중 결과</a>
-            <a href="#pricing" class="text-gray-300 hover:text-yellow-400 transition">요금제</a>
+            <a href="#benefits" class="text-gray-300 hover:text-yellow-400 transition">혜택</a>
           </div>
           
           <div id="auth-buttons" class="flex items-center space-x-4">
@@ -936,6 +1156,7 @@ app.get('*', async (c) => {
           <div id="user-menu" class="hidden items-center space-x-4">
             <span id="user-name" class="text-gray-300"></span>
             <span id="membership-badge" class="px-2 py-1 rounded text-xs font-bold"></span>
+            <span id="view-count" class="text-sm text-gray-400"></span>
             <button onclick="logout()" class="text-gray-400 hover:text-white transition">
               <i class="fas fa-sign-out-alt"></i>
             </button>
@@ -954,7 +1175,7 @@ app.get('*', async (c) => {
         <a href="#predictions" class="text-xl text-gray-300 py-3 border-b border-gray-800" onclick="toggleMobileMenu()">AI 추천</a>
         <a href="#analysis" class="text-xl text-gray-300 py-3 border-b border-gray-800" onclick="toggleMobileMenu()">분석</a>
         <a href="#results" class="text-xl text-gray-300 py-3 border-b border-gray-800" onclick="toggleMobileMenu()">적중 결과</a>
-        <a href="#pricing" class="text-xl text-gray-300 py-3 border-b border-gray-800" onclick="toggleMobileMenu()">요금제</a>
+        <a href="#benefits" class="text-xl text-gray-300 py-3 border-b border-gray-800" onclick="toggleMobileMenu()">혜택</a>
       </div>
     </div>
     
@@ -973,10 +1194,10 @@ app.get('*', async (c) => {
           
           <div class="flex flex-col sm:flex-row justify-center gap-4 mb-12">
             <a href="#predictions" class="bg-gradient-to-r from-yellow-500 to-orange-500 text-black px-8 py-4 rounded-xl font-bold text-lg hover:opacity-90 transition">
-              <i class="fas fa-magic mr-2"></i>무료로 1게임 받기
+              <i class="fas fa-magic mr-2"></i>무료로 5게임 받기
             </a>
-            <a href="#pricing" class="glass text-white px-8 py-4 rounded-xl font-bold text-lg hover:bg-white/10 transition">
-              <i class="fas fa-crown mr-2 text-yellow-400"></i>프리미엄 구독
+            <a href="#benefits" class="glass text-white px-8 py-4 rounded-xl font-bold text-lg hover:bg-white/10 transition">
+              <i class="fas fa-gift mr-2 text-green-400"></i>20게임 무료 받기
             </a>
           </div>
           
@@ -987,7 +1208,7 @@ app.get('*', async (c) => {
               <div class="text-gray-400 text-sm">분석 기간</div>
             </div>
             <div class="glass rounded-xl p-4">
-              <div class="text-3xl font-bold text-yellow-400">5세트</div>
+              <div class="text-3xl font-bold text-yellow-400">20세트</div>
               <div class="text-gray-400 text-sm">매주 추천</div>
             </div>
             <div class="glass rounded-xl p-4">
@@ -1022,6 +1243,7 @@ app.get('*', async (c) => {
             <span id="prediction-round">1151</span>회 AI 추천 번호
           </h2>
           <p class="text-gray-400">후나츠 사카이 알고리즘 + Gemini AI 분석</p>
+          <div id="view-status" class="mt-4 text-sm text-gray-400"></div>
         </div>
         
         <div id="predictions-container" class="space-y-6">
@@ -1098,62 +1320,62 @@ app.get('*', async (c) => {
       </div>
     </section>
     
-    <!-- Pricing Section -->
-    <section id="pricing" class="py-16 bg-black/30">
+    <!-- Benefits Section (제3자 동의 혜택) -->
+    <section id="benefits" class="py-16 bg-black/30">
       <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="text-center mb-12">
           <h2 class="text-3xl md:text-4xl font-bold mb-4">
-            <i class="fas fa-crown text-yellow-400 mr-2"></i>
-            요금제
+            <i class="fas fa-gift text-green-400 mr-2"></i>
+            무료 혜택
           </h2>
-          <p class="text-gray-400">더 많은 추천 번호와 상세 분석을 받아보세요</p>
+          <p class="text-gray-400">간단한 동의 하나로 4배 더 많은 추천 번호를 받아보세요!</p>
         </div>
         
         <div class="grid md:grid-cols-2 gap-8 max-w-4xl mx-auto">
-          <!-- Free Plan -->
+          <!-- 일반 회원 -->
           <div class="glass rounded-2xl p-8">
             <div class="text-center mb-6">
-              <h3 class="text-2xl font-bold">무료</h3>
-              <div class="text-4xl font-black mt-2">₩0</div>
-              <p class="text-gray-400">영원히 무료</p>
-            </div>
-            <ul class="space-y-4 mb-8">
-              <li class="flex items-center text-gray-300">
-                <i class="fas fa-check text-green-500 mr-3"></i>
-                매주 1게임 추천
-              </li>
-              <li class="flex items-center text-gray-300">
-                <i class="fas fa-check text-green-500 mr-3"></i>
-                기본 통계 분석
-              </li>
-              <li class="flex items-center text-gray-500">
-                <i class="fas fa-times text-red-500 mr-3"></i>
-                AI 분석 코멘트
-              </li>
-              <li class="flex items-center text-gray-500">
-                <i class="fas fa-times text-red-500 mr-3"></i>
-                TXT 다운로드
-              </li>
-            </ul>
-            <button class="w-full py-3 rounded-lg border border-gray-600 text-gray-400 cursor-default">
-              현재 플랜
-            </button>
-          </div>
-          
-          <!-- Premium Plan -->
-          <div class="relative glass rounded-2xl p-8 border-2 border-yellow-500">
-            <div class="absolute -top-4 left-1/2 transform -translate-x-1/2 bg-yellow-500 text-black px-4 py-1 rounded-full font-bold text-sm">
-              BEST
-            </div>
-            <div class="text-center mb-6">
-              <h3 class="text-2xl font-bold gradient-text">프리미엄</h3>
-              <div class="text-4xl font-black mt-2">₩9,900<span class="text-lg font-normal text-gray-400">/월</span></div>
-              <p class="text-gray-400">매주 5게임 + AI 분석</p>
+              <h3 class="text-2xl font-bold">일반 회원</h3>
+              <div class="text-4xl font-black mt-2 text-gray-400">5게임</div>
+              <p class="text-gray-400">매주 무료</p>
             </div>
             <ul class="space-y-4 mb-8">
               <li class="flex items-center text-gray-300">
                 <i class="fas fa-check text-green-500 mr-3"></i>
                 매주 5게임 추천
+              </li>
+              <li class="flex items-center text-gray-300">
+                <i class="fas fa-check text-green-500 mr-3"></i>
+                기본 통계 분석
+              </li>
+              <li class="flex items-center text-gray-300">
+                <i class="fas fa-check text-green-500 mr-3"></i>
+                AI 분석 코멘트
+              </li>
+              <li class="flex items-center text-gray-500">
+                <i class="fas fa-times text-red-500 mr-3"></i>
+                추가 15게임
+              </li>
+            </ul>
+            <button class="w-full py-3 rounded-lg border border-gray-600 text-gray-400 cursor-default">
+              기본 플랜
+            </button>
+          </div>
+          
+          <!-- 제휴 회원 -->
+          <div class="relative glass rounded-2xl p-8 border-2 border-green-500">
+            <div class="absolute -top-4 left-1/2 transform -translate-x-1/2 bg-green-500 text-black px-4 py-1 rounded-full font-bold text-sm">
+              추천
+            </div>
+            <div class="text-center mb-6">
+              <h3 class="text-2xl font-bold text-green-400">제휴 회원</h3>
+              <div class="text-4xl font-black mt-2">20게임</div>
+              <p class="text-gray-400">매주 무료 (4배!)</p>
+            </div>
+            <ul class="space-y-4 mb-8">
+              <li class="flex items-center text-gray-300">
+                <i class="fas fa-check text-green-500 mr-3"></i>
+                매주 20게임 추천
               </li>
               <li class="flex items-center text-gray-300">
                 <i class="fas fa-check text-green-500 mr-3"></i>
@@ -1168,10 +1390,15 @@ app.get('*', async (c) => {
                 TXT 다운로드
               </li>
             </ul>
-            <button onclick="subscribe()" class="w-full py-3 rounded-lg bg-gradient-to-r from-yellow-500 to-orange-500 text-black font-bold hover:opacity-90 transition">
-              구독하기
+            <button id="upgrade-btn" onclick="showUpgradeModal()" class="w-full py-3 rounded-lg bg-gradient-to-r from-green-500 to-emerald-500 text-black font-bold hover:opacity-90 transition">
+              무료로 업그레이드
             </button>
           </div>
+        </div>
+        
+        <div class="mt-8 text-center text-gray-500 text-sm max-w-2xl mx-auto">
+          <p class="mb-2"><i class="fas fa-info-circle mr-1"></i> 제휴 회원 혜택을 받으려면 개인정보 제3자 제공에 동의해 주세요.</p>
+          <p>매주 일요일 오전 6시에 열람 횟수가 초기화됩니다.</p>
         </div>
       </div>
     </section>
@@ -1195,7 +1422,7 @@ app.get('*', async (c) => {
             <ul class="space-y-2 text-gray-400 text-sm">
               <li><a href="#predictions" class="hover:text-yellow-400">AI 추천</a></li>
               <li><a href="#analysis" class="hover:text-yellow-400">분석</a></li>
-              <li><a href="#pricing" class="hover:text-yellow-400">요금제</a></li>
+              <li><a href="#benefits" class="hover:text-yellow-400">혜택</a></li>
             </ul>
           </div>
           <div>
@@ -1251,9 +1478,9 @@ app.get('*', async (c) => {
     </div>
   </div>
   
-  <!-- Register Modal -->
+  <!-- Register Modal (제3자 동의 포함) -->
   <div id="register-modal" class="modal">
-    <div class="glass rounded-2xl p-8 max-w-md w-full mx-4">
+    <div class="glass rounded-2xl p-8 max-w-md w-full mx-4 max-h-[90vh] overflow-y-auto">
       <div class="flex justify-between items-center mb-6">
         <h3 class="text-2xl font-bold">회원가입</h3>
         <button onclick="hideRegisterModal()" class="text-gray-400 hover:text-white">
@@ -1263,21 +1490,41 @@ app.get('*', async (c) => {
       <form id="register-form" onsubmit="handleRegister(event)">
         <div class="space-y-4">
           <div>
-            <label class="block text-sm text-gray-400 mb-2">이름</label>
+            <label class="block text-sm text-gray-400 mb-2">이름 <span class="text-red-500">*</span></label>
             <input type="text" name="name" required class="w-full px-4 py-3 rounded-lg bg-white/10 border border-gray-700 focus:border-yellow-500 focus:outline-none">
           </div>
           <div>
-            <label class="block text-sm text-gray-400 mb-2">이메일</label>
+            <label class="block text-sm text-gray-400 mb-2">이메일 <span class="text-red-500">*</span></label>
             <input type="email" name="email" required class="w-full px-4 py-3 rounded-lg bg-white/10 border border-gray-700 focus:border-yellow-500 focus:outline-none">
           </div>
           <div>
-            <label class="block text-sm text-gray-400 mb-2">비밀번호</label>
+            <label class="block text-sm text-gray-400 mb-2">비밀번호 <span class="text-red-500">*</span></label>
             <input type="password" name="password" required minlength="6" class="w-full px-4 py-3 rounded-lg bg-white/10 border border-gray-700 focus:border-yellow-500 focus:outline-none">
           </div>
           <div>
-            <label class="block text-sm text-gray-400 mb-2">전화번호 (선택)</label>
-            <input type="tel" name="phone" class="w-full px-4 py-3 rounded-lg bg-white/10 border border-gray-700 focus:border-yellow-500 focus:outline-none">
+            <label class="block text-sm text-gray-400 mb-2">전화번호 <span class="text-gray-500">(제휴 회원 필수)</span></label>
+            <input type="tel" name="phone" id="register-phone" class="w-full px-4 py-3 rounded-lg bg-white/10 border border-gray-700 focus:border-yellow-500 focus:outline-none" placeholder="010-0000-0000">
           </div>
+          
+          <!-- 제3자 동의 체크박스 -->
+          <div class="glass rounded-lg p-4 border border-green-500/30">
+            <label class="flex items-start gap-3 cursor-pointer">
+              <input type="checkbox" name="agreedToThirdParty" id="agree-checkbox" class="mt-1 w-5 h-5 accent-green-500" onchange="togglePhoneRequired()">
+              <div>
+                <span class="text-green-400 font-medium">[선택] 개인정보 제3자 제공 동의</span>
+                <p class="text-gray-400 text-xs mt-1">
+                  동의 시 <span class="text-green-400 font-bold">매주 20게임</span> 무료 열람!
+                </p>
+              </div>
+            </label>
+            <div class="mt-3 text-xs text-gray-500 border-t border-gray-700 pt-3">
+              <p><strong>제공받는 자:</strong> XIVIX 제휴서비스</p>
+              <p><strong>제공 목적:</strong> 로또 분석 서비스 안내, 보험/재무 설계 상담 및 마케팅 자료 활용</p>
+              <p><strong>제공 항목:</strong> 이름, 연락처, 이메일</p>
+              <p><strong>보유 기간:</strong> 동의 철회 시 또는 제공 목적 달성 시까지</p>
+            </div>
+          </div>
+          
           <button type="submit" class="w-full py-3 rounded-lg bg-gradient-to-r from-yellow-500 to-orange-500 text-black font-bold hover:opacity-90 transition">
             가입하기
           </button>
@@ -1286,6 +1533,47 @@ app.get('*', async (c) => {
       <p class="text-center text-gray-400 text-sm mt-4">
         이미 계정이 있으신가요? <a href="#" onclick="showLoginModal(); hideRegisterModal();" class="text-yellow-400 hover:underline">로그인</a>
       </p>
+    </div>
+  </div>
+  
+  <!-- Upgrade Modal (기존 회원 업그레이드) -->
+  <div id="upgrade-modal" class="modal">
+    <div class="glass rounded-2xl p-8 max-w-md w-full mx-4">
+      <div class="flex justify-between items-center mb-6">
+        <h3 class="text-2xl font-bold text-green-400">제휴 회원 업그레이드</h3>
+        <button onclick="hideUpgradeModal()" class="text-gray-400 hover:text-white">
+          <i class="fas fa-times text-xl"></i>
+        </button>
+      </div>
+      
+      <div class="text-center mb-6">
+        <div class="text-6xl mb-4">🎁</div>
+        <p class="text-xl font-bold">매주 20게임 무료!</p>
+        <p class="text-gray-400">간단한 동의만으로 4배 더 많은 추천 번호를 받아보세요</p>
+      </div>
+      
+      <form id="upgrade-form" onsubmit="handleUpgrade(event)">
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-2">연락처 <span class="text-red-500">*</span></label>
+            <input type="tel" name="phone" required class="w-full px-4 py-3 rounded-lg bg-white/10 border border-gray-700 focus:border-green-500 focus:outline-none" placeholder="010-0000-0000">
+          </div>
+          
+          <div class="glass rounded-lg p-4 border border-green-500/30">
+            <div class="text-xs text-gray-400">
+              <p class="font-medium text-white mb-2">개인정보 제3자 제공 동의</p>
+              <p><strong>제공받는 자:</strong> XIVIX 제휴서비스</p>
+              <p><strong>제공 목적:</strong> 로또 분석 서비스 안내, 보험/재무 설계 상담 및 마케팅 자료 활용</p>
+              <p><strong>제공 항목:</strong> 이름, 연락처, 이메일</p>
+              <p><strong>보유 기간:</strong> 동의 철회 시 또는 제공 목적 달성 시까지</p>
+            </div>
+          </div>
+          
+          <button type="submit" class="w-full py-3 rounded-lg bg-gradient-to-r from-green-500 to-emerald-500 text-black font-bold hover:opacity-90 transition">
+            동의하고 업그레이드
+          </button>
+        </div>
+      </form>
     </div>
   </div>
   
@@ -1352,6 +1640,8 @@ app.get('*', async (c) => {
       const userMenu = document.getElementById('user-menu');
       const userName = document.getElementById('user-name');
       const membershipBadge = document.getElementById('membership-badge');
+      const viewCount = document.getElementById('view-count');
+      const upgradeBtn = document.getElementById('upgrade-btn');
       
       if (currentUser) {
         authButtons.classList.add('hidden');
@@ -1359,20 +1649,35 @@ app.get('*', async (c) => {
         userMenu.classList.add('flex');
         userName.textContent = currentUser.name;
         
-        if (currentUser.membership_type === 'premium') {
-          membershipBadge.textContent = 'PREMIUM';
-          membershipBadge.className = 'px-2 py-1 rounded text-xs font-bold bg-yellow-500 text-black';
-        } else if (currentUser.membership_type === 'admin') {
+        const isPartner = currentUser.agreed_to_third_party === 1;
+        const isAdmin = currentUser.membership_type === 'admin';
+        
+        if (isAdmin) {
           membershipBadge.textContent = 'ADMIN';
           membershipBadge.className = 'px-2 py-1 rounded text-xs font-bold bg-red-500 text-white';
+          viewCount.textContent = '';
+        } else if (isPartner) {
+          membershipBadge.textContent = '제휴';
+          membershipBadge.className = 'px-2 py-1 rounded text-xs font-bold partner-badge text-white';
+          viewCount.textContent = currentUser.remaining_views + '/20 남음';
+          upgradeBtn.textContent = '이미 제휴 회원';
+          upgradeBtn.disabled = true;
+          upgradeBtn.className = 'w-full py-3 rounded-lg bg-gray-600 text-gray-400 cursor-not-allowed';
         } else {
-          membershipBadge.textContent = 'FREE';
+          membershipBadge.textContent = '일반';
           membershipBadge.className = 'px-2 py-1 rounded text-xs font-bold bg-gray-600 text-white';
+          viewCount.textContent = currentUser.remaining_views + '/5 남음';
         }
       } else {
         authButtons.classList.remove('hidden');
         userMenu.classList.add('hidden');
       }
+    }
+    
+    function togglePhoneRequired() {
+      const checkbox = document.getElementById('agree-checkbox');
+      const phoneInput = document.getElementById('register-phone');
+      phoneInput.required = checkbox.checked;
     }
 
     async function handleLogin(e) {
@@ -1408,11 +1713,20 @@ app.get('*', async (c) => {
     async function handleRegister(e) {
       e.preventDefault();
       const form = e.target;
+      const agreedToThirdParty = form.agreedToThirdParty.checked;
+      
+      // 제3자 동의 시 전화번호 필수
+      if (agreedToThirdParty && !form.phone.value) {
+        showToast('제휴 회원은 연락처가 필수입니다.', 'error');
+        return;
+      }
+      
       const data = {
         name: form.name.value,
         email: form.email.value,
         password: form.password.value,
-        phone: form.phone.value
+        phone: form.phone.value,
+        agreedToThirdParty
       };
       
       try {
@@ -1428,12 +1742,51 @@ app.get('*', async (c) => {
           hideRegisterModal();
           updateAuthUI();
           loadPredictions();
-          showToast('회원가입 성공!', 'success');
+          
+          if (agreedToThirdParty) {
+            showToast('회원가입 성공! 제휴 회원으로 매주 20게임을 무료로 열람하세요! 🎉', 'success');
+          } else {
+            showToast('회원가입 성공! 매주 5게임을 무료로 열람하세요!', 'success');
+          }
         } else {
           showToast(response.error, 'error');
         }
       } catch (e) {
         showToast('회원가입 실패', 'error');
+      }
+    }
+    
+    async function handleUpgrade(e) {
+      e.preventDefault();
+      const form = e.target;
+      
+      if (!currentUser) {
+        showToast('로그인이 필요합니다.', 'error');
+        hideUpgradeModal();
+        showLoginModal();
+        return;
+      }
+      
+      const data = {
+        phone: form.phone.value
+      };
+      
+      try {
+        const response = await api('/auth/agree-partner', {
+          method: 'POST',
+          body: JSON.stringify(data)
+        });
+        
+        if (response.success) {
+          hideUpgradeModal();
+          checkAuth();
+          loadPredictions();
+          showToast('🎉 제휴 회원으로 업그레이드 완료! 매주 20게임을 무료로 열람하세요!', 'success');
+        } else {
+          showToast(response.error, 'error');
+        }
+      } catch (e) {
+        showToast('업그레이드 실패', 'error');
       }
     }
 
@@ -1452,6 +1805,19 @@ app.get('*', async (c) => {
     function hideLoginModal() { document.getElementById('login-modal').classList.remove('show'); }
     function showRegisterModal() { document.getElementById('register-modal').classList.add('show'); }
     function hideRegisterModal() { document.getElementById('register-modal').classList.remove('show'); }
+    function showUpgradeModal() {
+      if (!currentUser) {
+        showToast('로그인 후 이용해 주세요.', 'warning');
+        showLoginModal();
+        return;
+      }
+      if (currentUser.agreed_to_third_party) {
+        showToast('이미 제휴 회원입니다.', 'warning');
+        return;
+      }
+      document.getElementById('upgrade-modal').classList.add('show');
+    }
+    function hideUpgradeModal() { document.getElementById('upgrade-modal').classList.remove('show'); }
     function toggleMobileMenu() { document.getElementById('mobile-menu').classList.toggle('hidden'); }
 
     // Data Loading Functions
@@ -1459,10 +1825,24 @@ app.get('*', async (c) => {
       try {
         const data = await api('/predictions');
         const container = document.getElementById('predictions-container');
+        const viewStatus = document.getElementById('view-status');
         document.getElementById('prediction-round').textContent = data.round_number;
         
+        // 열람 상태 표시
+        if (data.user_info) {
+          const info = data.user_info;
+          if (info.membership_type === 'admin') {
+            viewStatus.innerHTML = '<span class="text-red-400">관리자 모드 - 모든 번호 열람 가능</span>';
+          } else if (info.membership_type === 'partner') {
+            viewStatus.innerHTML = '<span class="text-green-400">제휴 회원</span> - ' + info.weekly_limit + '게임 열람 가능 (남은 횟수: ' + info.remaining_views + ')';
+          } else {
+            viewStatus.innerHTML = '<span class="text-gray-400">일반 회원</span> - ' + info.weekly_limit + '게임 열람 가능 <a href="#benefits" class="text-green-400 hover:underline">(업그레이드하면 20게임!)</a>';
+          }
+        } else {
+          viewStatus.innerHTML = '비회원 - 1게임만 열람 가능 <a href="#" onclick="showRegisterModal()" class="text-yellow-400 hover:underline">(가입하면 5게임 무료!)</a>';
+        }
+        
         container.innerHTML = data.predictions.map((pred, index) => {
-          const isFirstFree = index === 0;
           const numbersHtml = pred.numbers.map(num => {
             if (num === '?') {
               return '<div class="lotto-ball locked-ball"><i class="fas fa-lock"></i></div>';
@@ -1479,7 +1859,7 @@ app.get('*', async (c) => {
               '</div>' +
               '<div class="flex-1 text-gray-400 text-sm">' +
                 (pred.locked ? 
-                  '<span class="text-yellow-500"><i class="fas fa-crown mr-1"></i>프리미엄 전용</span>' : 
+                  '<span class="text-green-500"><i class="fas fa-gift mr-1"></i>' + pred.ai_comment + '</span>' : 
                   pred.ai_comment) +
               '</div>' +
             '</div>' +
@@ -1621,42 +2001,6 @@ app.get('*', async (c) => {
     // Actions
     function downloadPredictions() {
       window.location.href = '/api/predictions/download';
-    }
-
-    async function subscribe() {
-      if (!currentUser) {
-        showLoginModal();
-        showToast('로그인이 필요합니다.', 'warning');
-        return;
-      }
-      
-      try {
-        const response = await api('/payment/init', {
-          method: 'POST',
-          body: JSON.stringify({ months: 1 })
-        });
-        
-        if (response.success) {
-          // In production, integrate with KG이니시스 SDK
-          // For demo, simulate payment success
-          const completeResponse = await api('/payment/complete', {
-            method: 'POST',
-            body: JSON.stringify({
-              order_id: response.order_id,
-              pg_tid: 'DEMO_' + Date.now(),
-              status: 'success'
-            })
-          });
-          
-          if (completeResponse.success) {
-            showToast('프리미엄 구독 완료! 🎉', 'success');
-            checkAuth();
-            loadPredictions();
-          }
-        }
-      } catch (e) {
-        showToast('결제 처리 중 오류가 발생했습니다.', 'error');
-      }
     }
 
     function showToast(message, type = 'success') {
