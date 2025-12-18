@@ -306,13 +306,19 @@ app.post('/api/auth/login', async (c) => {
       maxAge: 60 * 60 * 24 * 7
     })
     
+    // subscription_type 결정: admin > partner > basic
+    let subType = user.subscription_type
+    if (subType !== 'admin') {
+      subType = user.agreed_to_third_party ? 'partner' : 'basic'
+    }
+    
     return c.json({
       success: true,
       token,
       user: {
         email: user.email,
         name: user.name,
-        subscription_type: user.agreed_to_third_party ? 'partner' : 'basic',
+        subscription_type: subType,
         weekly_view_limit: user.weekly_view_limit || 5,
         current_view_count: user.current_view_count || 0,
         agreed_to_third_party: user.agreed_to_third_party || 0
