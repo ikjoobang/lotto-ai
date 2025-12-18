@@ -1006,9 +1006,9 @@ app.get('/api/predictions/download', async (c) => {
     const canView = isAdmin || pred.set_index <= weeklyLimit
     
     if (!canView) {
-      content += `[조합 ${pred.set_index}] 🔒 ${isPartner ? '열람 한도 초과' : '제휴 회원 전용'}\n\n`
+      content += `[${pred.set_index}게임] 🔒 ${isPartner ? '열람 한도 초과' : '제휴 회원 전용'}\n\n`
     } else {
-      content += `[조합 ${pred.set_index}]\n`
+      content += `[${pred.set_index}게임]\n`
       content += `번호: ${pred.num1} - ${pred.num2} - ${pred.num3} - ${pred.num4} - ${pred.num5} - ${pred.num6}\n`
       content += `분석: ${pred.ai_comment}\n\n`
     }
@@ -2187,7 +2187,7 @@ app.get('/', async (c) => {
           return '<div class="glass rounded-2xl p-6 ' + (pred.locked ? 'opacity-75' : '') + '">' +
             '<div class="flex flex-col md:flex-row md:items-center justify-between gap-4">' +
               '<div class="flex items-center gap-4">' +
-                '<div class="text-2xl font-bold text-yellow-400">#' + pred.set_index + '</div>' +
+                '<div class="text-2xl font-bold text-yellow-400">' + pred.set_index + '게임</div>' +
                 '<div class="flex gap-2">' + numbersHtml + '</div>' +
               '</div>' +
               '<div class="flex-1 text-gray-400 text-sm">' +
@@ -2300,7 +2300,7 @@ app.get('/', async (c) => {
             '<div class="space-y-2">' +
               preds.map(p => 
                 '<div class="flex items-center gap-4 text-sm">' +
-                  '<span class="text-gray-500">#' + p.set_index + '</span>' +
+                  '<span class="text-gray-500">' + p.set_index + '게임</span>' +
                   '<span class="font-mono">' + [p.num1, p.num2, p.num3, p.num4, p.num5, p.num6].join('-') + '</span>' +
                   '<span class="' + (p.matched_count >= 3 ? 'text-yellow-400 font-bold' : 'text-gray-500') + '">' +
                     p.matched_count + '개 일치 (' + p.rank + ')' +
