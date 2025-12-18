@@ -1028,10 +1028,321 @@ app.get('/api/predictions/download', async (c) => {
 })
 
 // ============================
+// Admin Dashboard Page
+// ============================
+app.get('/admin', async (c) => {
+  const adminHtml = `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LOTTO AI - 관리자 대시보드</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet">
+  <style>
+    body { background: #0f172a; font-family: 'Noto Sans KR', sans-serif; }
+    .glass { background: rgba(255,255,255,0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
+  </style>
+</head>
+<body class="text-white min-h-screen">
+  <div class="max-w-7xl mx-auto px-4 py-8">
+    <!-- Header -->
+    <div class="flex justify-between items-center mb-8">
+      <div>
+        <h1 class="text-3xl font-bold text-yellow-400"><i class="fas fa-cog mr-2"></i>관리자 대시보드</h1>
+        <p class="text-gray-400">LOTTO AI 시스템 관리</p>
+      </div>
+      <a href="/" class="glass px-4 py-2 rounded-lg hover:bg-white/10">
+        <i class="fas fa-home mr-2"></i>메인으로
+      </a>
+    </div>
+    
+    <!-- Login Form -->
+    <div id="login-section" class="glass rounded-2xl p-8 max-w-md mx-auto">
+      <h2 class="text-xl font-bold mb-6 text-center">관리자 로그인</h2>
+      <form id="admin-login-form">
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-2">이메일</label>
+            <input type="email" id="admin-email" required class="w-full px-4 py-3 rounded-lg bg-white/10 border border-gray-700 focus:border-yellow-500 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-2">비밀번호</label>
+            <input type="password" id="admin-password" required class="w-full px-4 py-3 rounded-lg bg-white/10 border border-gray-700 focus:border-yellow-500 focus:outline-none">
+          </div>
+          <button type="submit" class="w-full py-3 rounded-lg bg-yellow-500 text-black font-bold hover:bg-yellow-400">로그인</button>
+        </div>
+      </form>
+      <p id="login-error" class="text-red-500 text-center mt-4 hidden"></p>
+    </div>
+    
+    <!-- Admin Dashboard (hidden until login) -->
+    <div id="admin-dashboard" class="hidden">
+      <!-- Stats Cards -->
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+        <div class="glass rounded-xl p-6">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-gray-400 text-sm">총 리드 수</p>
+              <p id="stat-total-leads" class="text-3xl font-bold text-yellow-400">0</p>
+            </div>
+            <i class="fas fa-users text-3xl text-yellow-400/50"></i>
+          </div>
+        </div>
+        <div class="glass rounded-xl p-6">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-gray-400 text-sm">미추출 리드</p>
+              <p id="stat-new-leads" class="text-3xl font-bold text-green-400">0</p>
+            </div>
+            <i class="fas fa-user-plus text-3xl text-green-400/50"></i>
+          </div>
+        </div>
+        <div class="glass rounded-xl p-6">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-gray-400 text-sm">추출 완료</p>
+              <p id="stat-exported-leads" class="text-3xl font-bold text-blue-400">0</p>
+            </div>
+            <i class="fas fa-file-export text-3xl text-blue-400/50"></i>
+          </div>
+        </div>
+        <div class="glass rounded-xl p-6">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-gray-400 text-sm">이번 주 신규</p>
+              <p id="stat-this-week" class="text-3xl font-bold text-purple-400">0</p>
+            </div>
+            <i class="fas fa-calendar-week text-3xl text-purple-400/50"></i>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Action Buttons -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        <button onclick="exportLeads()" class="glass rounded-xl p-6 hover:bg-white/10 transition text-left">
+          <i class="fas fa-download text-2xl text-green-400 mb-4"></i>
+          <h3 class="text-lg font-bold">CSV 다운로드</h3>
+          <p class="text-gray-400 text-sm">제휴회원 리드 엑셀 추출 (김미경 지사장용)</p>
+        </button>
+        <button onclick="weeklyReset()" class="glass rounded-xl p-6 hover:bg-white/10 transition text-left">
+          <i class="fas fa-sync text-2xl text-blue-400 mb-4"></i>
+          <h3 class="text-lg font-bold">주간 리셋</h3>
+          <p class="text-gray-400 text-sm">모든 회원 열람 횟수 초기화</p>
+        </button>
+        <button onclick="generatePredictions()" class="glass rounded-xl p-6 hover:bg-white/10 transition text-left">
+          <i class="fas fa-robot text-2xl text-yellow-400 mb-4"></i>
+          <h3 class="text-lg font-bold">AI 예측 생성</h3>
+          <p class="text-gray-400 text-sm">다음 회차 번호 20게임 생성</p>
+        </button>
+      </div>
+      
+      <!-- Recent Leads Table -->
+      <div class="glass rounded-2xl p-6">
+        <h3 class="text-xl font-bold mb-4"><i class="fas fa-list mr-2"></i>최근 제휴회원 리드</h3>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left">
+            <thead>
+              <tr class="border-b border-gray-700">
+                <th class="py-3 px-4">ID</th>
+                <th class="py-3 px-4">이름</th>
+                <th class="py-3 px-4">연락처</th>
+                <th class="py-3 px-4">이메일</th>
+                <th class="py-3 px-4">동의일</th>
+                <th class="py-3 px-4">상태</th>
+              </tr>
+            </thead>
+            <tbody id="leads-table">
+              <tr><td colspan="6" class="text-center py-8 text-gray-400">로딩 중...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <!-- Toast -->
+  <div id="toast" class="fixed bottom-4 right-4 z-50 hidden">
+    <div class="glass rounded-lg px-6 py-4 flex items-center space-x-3">
+      <i id="toast-icon" class="fas fa-check-circle text-green-500"></i>
+      <span id="toast-message"></span>
+    </div>
+  </div>
+
+  <script>
+    let adminToken = localStorage.getItem('admin_token');
+    
+    // Check admin session
+    if (adminToken) {
+      checkAdminAuth();
+    }
+    
+    document.getElementById('admin-login-form').addEventListener('submit', async function(e) {
+      e.preventDefault();
+      const email = document.getElementById('admin-email').value;
+      const password = document.getElementById('admin-password').value;
+      
+      try {
+        const response = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        const data = await response.json();
+        
+        if (data.success && data.user.subscription_type === 'admin') {
+          adminToken = data.token;
+          localStorage.setItem('admin_token', data.token);
+          showDashboard();
+        } else if (data.success) {
+          document.getElementById('login-error').textContent = '관리자 계정이 아닙니다.';
+          document.getElementById('login-error').classList.remove('hidden');
+        } else {
+          document.getElementById('login-error').textContent = data.error || '로그인 실패';
+          document.getElementById('login-error').classList.remove('hidden');
+        }
+      } catch (e) {
+        document.getElementById('login-error').textContent = '서버 오류';
+        document.getElementById('login-error').classList.remove('hidden');
+      }
+    });
+    
+    async function checkAdminAuth() {
+      try {
+        const response = await fetch('/api/auth/me', {
+          headers: { 'Authorization': 'Bearer ' + adminToken }
+        });
+        const data = await response.json();
+        if (data.user && data.user.subscription_type === 'admin') {
+          showDashboard();
+        }
+      } catch (e) {
+        localStorage.removeItem('admin_token');
+      }
+    }
+    
+    function showDashboard() {
+      document.getElementById('login-section').classList.add('hidden');
+      document.getElementById('admin-dashboard').classList.remove('hidden');
+      loadStats();
+      loadLeads();
+    }
+    
+    async function loadStats() {
+      try {
+        const response = await fetch('/api/admin/leads/stats', {
+          headers: { 'Authorization': 'Bearer ' + adminToken }
+        });
+        const data = await response.json();
+        document.getElementById('stat-total-leads').textContent = data.total || 0;
+        document.getElementById('stat-new-leads').textContent = data.not_exported || 0;
+        document.getElementById('stat-exported-leads').textContent = data.exported || 0;
+        document.getElementById('stat-this-week').textContent = data.this_week || 0;
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    
+    async function loadLeads() {
+      try {
+        const response = await fetch('/api/admin/leads', {
+          headers: { 'Authorization': 'Bearer ' + adminToken }
+        });
+        const data = await response.json();
+        const tbody = document.getElementById('leads-table');
+        
+        if (!data.leads || data.leads.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="6" class="text-center py-8 text-gray-400">리드가 없습니다.</td></tr>';
+          return;
+        }
+        
+        tbody.innerHTML = data.leads.slice(0, 20).map(lead => 
+          '<tr class="border-b border-gray-800">' +
+            '<td class="py-3 px-4">' + lead.id + '</td>' +
+            '<td class="py-3 px-4 font-medium">' + lead.name + '</td>' +
+            '<td class="py-3 px-4">' + (lead.phone || '-') + '</td>' +
+            '<td class="py-3 px-4">' + lead.email + '</td>' +
+            '<td class="py-3 px-4 text-sm text-gray-400">' + new Date(lead.agreed_at).toLocaleDateString('ko-KR') + '</td>' +
+            '<td class="py-3 px-4">' + (lead.exported ? '<span class="text-blue-400">추출완료</span>' : '<span class="text-green-400">미추출</span>') + '</td>' +
+          '</tr>'
+        ).join('');
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    
+    function exportLeads() {
+      window.location.href = '/api/admin/leads/export?token=' + adminToken;
+      showToast('CSV 다운로드를 시작합니다.', 'success');
+      setTimeout(loadStats, 2000);
+      setTimeout(loadLeads, 2000);
+    }
+    
+    async function weeklyReset() {
+      if (!confirm('정말 모든 회원의 열람 횟수를 초기화하시겠습니까?')) return;
+      
+      try {
+        const response = await fetch('/api/admin/weekly-reset', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + adminToken }
+        });
+        const data = await response.json();
+        if (data.success) {
+          showToast('주간 리셋 완료! ' + (data.affected_rows || 0) + '명 초기화됨', 'success');
+        } else {
+          showToast(data.error || '리셋 실패', 'error');
+        }
+      } catch (e) {
+        showToast('서버 오류', 'error');
+      }
+    }
+    
+    async function generatePredictions() {
+      if (!confirm('AI 예측 번호를 새로 생성하시겠습니까? (기존 번호 덮어쓰기)')) return;
+      
+      showToast('AI 예측 생성 중... 잠시만 기다려주세요.', 'warning');
+      
+      try {
+        const response = await fetch('/api/admin/generate-predictions', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + adminToken }
+        });
+        const data = await response.json();
+        if (data.success) {
+          showToast(data.round_number + '회차 ' + data.predictions_count + '게임 생성 완료!', 'success');
+        } else {
+          showToast(data.error || '생성 실패', 'error');
+        }
+      } catch (e) {
+        showToast('서버 오류', 'error');
+      }
+    }
+    
+    function showToast(message, type) {
+      const toast = document.getElementById('toast');
+      const icon = document.getElementById('toast-icon');
+      const msg = document.getElementById('toast-message');
+      
+      msg.textContent = message;
+      icon.className = 'fas ' + (type === 'success' ? 'fa-check-circle text-green-500' : 
+                                  type === 'error' ? 'fa-exclamation-circle text-red-500' : 
+                                  'fa-exclamation-triangle text-yellow-500');
+      
+      toast.classList.remove('hidden');
+      setTimeout(() => toast.classList.add('hidden'), 3000);
+    }
+  </script>
+</body>
+</html>`;
+  
+  return c.html(adminHtml)
+})
+
+// ============================
 // Frontend HTML (새 비즈니스 모델 반영)
 // ============================
 
-app.get('*', async (c) => {
+app.get('/', async (c) => {
   const html = `<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -1045,11 +1356,33 @@ app.get('*', async (c) => {
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap');
     
-    * { font-family: 'Noto Sans KR', sans-serif; }
+    * { 
+      font-family: 'Noto Sans KR', sans-serif;
+      /* 보안: 텍스트 선택 방지 */
+      -webkit-user-select: none;
+      -moz-user-select: none;
+      -ms-user-select: none;
+      user-select: none;
+    }
+    
+    /* 입력 필드는 선택 허용 */
+    input, textarea { 
+      -webkit-user-select: text;
+      -moz-user-select: text;
+      -ms-user-select: text;
+      user-select: text;
+    }
     
     body {
       background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 50%, #16213e 100%);
       min-height: 100vh;
+    }
+    
+    /* 보안: 이미지 드래그 방지 */
+    img { 
+      -webkit-user-drag: none;
+      user-drag: none;
+      pointer-events: none;
     }
     
     .glass {
@@ -2016,6 +2349,110 @@ app.get('*', async (c) => {
       toast.classList.remove('hidden');
       setTimeout(() => toast.classList.add('hidden'), 3000);
     }
+
+    // ============================
+    // 🔒 보안 기능 (Security Features)
+    // ============================
+    
+    // 1. 우클릭 방지
+    document.addEventListener('contextmenu', function(e) {
+      e.preventDefault();
+      showToast('우클릭이 비활성화되어 있습니다.', 'warning');
+      return false;
+    });
+    
+    // 2. 키보드 단축키 방지 (Ctrl+C, Ctrl+U, Ctrl+S, F12, Ctrl+Shift+I)
+    document.addEventListener('keydown', function(e) {
+      // F12 (개발자도구)
+      if (e.key === 'F12') {
+        e.preventDefault();
+        return false;
+      }
+      // Ctrl+Shift+I (개발자도구)
+      if (e.ctrlKey && e.shiftKey && e.key === 'I') {
+        e.preventDefault();
+        return false;
+      }
+      // Ctrl+Shift+J (콘솔)
+      if (e.ctrlKey && e.shiftKey && e.key === 'J') {
+        e.preventDefault();
+        return false;
+      }
+      // Ctrl+U (소스보기)
+      if (e.ctrlKey && e.key === 'u') {
+        e.preventDefault();
+        showToast('소스 보기가 비활성화되어 있습니다.', 'warning');
+        return false;
+      }
+      // Ctrl+S (저장)
+      if (e.ctrlKey && e.key === 's') {
+        e.preventDefault();
+        return false;
+      }
+      // Ctrl+C (복사) - 입력 필드 외에서만 차단
+      if (e.ctrlKey && e.key === 'c') {
+        const activeElement = document.activeElement;
+        if (activeElement.tagName !== 'INPUT' && activeElement.tagName !== 'TEXTAREA') {
+          e.preventDefault();
+          showToast('복사가 비활성화되어 있습니다.', 'warning');
+          return false;
+        }
+      }
+      // Ctrl+P (인쇄)
+      if (e.ctrlKey && e.key === 'p') {
+        e.preventDefault();
+        showToast('인쇄가 비활성화되어 있습니다.', 'warning');
+        return false;
+      }
+      // PrintScreen
+      if (e.key === 'PrintScreen') {
+        e.preventDefault();
+        showToast('화면 캡처가 비활성화되어 있습니다.', 'warning');
+        return false;
+      }
+    });
+    
+    // 3. 드래그 방지
+    document.addEventListener('dragstart', function(e) {
+      e.preventDefault();
+      return false;
+    });
+    
+    // 4. 텍스트 선택 방지 (입력 필드 제외)
+    document.addEventListener('selectstart', function(e) {
+      const activeElement = document.activeElement;
+      if (activeElement.tagName !== 'INPUT' && activeElement.tagName !== 'TEXTAREA') {
+        e.preventDefault();
+        return false;
+      }
+    });
+    
+    // 5. 개발자 도구 감지 (디버거 감지)
+    (function() {
+      const devtools = { open: false };
+      const threshold = 160;
+      
+      setInterval(function() {
+        const widthThreshold = window.outerWidth - window.innerWidth > threshold;
+        const heightThreshold = window.outerHeight - window.innerHeight > threshold;
+        
+        if (widthThreshold || heightThreshold) {
+          if (!devtools.open) {
+            devtools.open = true;
+            console.clear();
+            console.log('%c🚨 경고: 개발자 도구가 열려 있습니다!', 'color: red; font-size: 24px; font-weight: bold;');
+            console.log('%c이 사이트의 콘텐츠를 무단으로 복사하거나 변조하는 행위는 법적 제재를 받을 수 있습니다.', 'color: orange; font-size: 14px;');
+          }
+        } else {
+          devtools.open = false;
+        }
+      }, 1000);
+    })();
+    
+    // 6. 콘솔 경고 메시지
+    console.log('%c🛡️ LOTTO AI 보안 시스템', 'color: #fcd34d; font-size: 20px; font-weight: bold;');
+    console.log('%c이 사이트의 콘텐츠는 저작권법에 의해 보호됩니다.', 'color: #ef4444; font-size: 14px;');
+    console.log('%c무단 복제, 배포, 변조 시 법적 책임을 질 수 있습니다.', 'color: #ef4444; font-size: 14px;');
   </script>
 </body>
 </html>`
