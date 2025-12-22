@@ -640,7 +640,14 @@ app.post('/api/admin/generate-predictions', async (c) => {
   }
   
   const db = c.env.DB
-  const geminiApiKey = c.env.GEMINI_API_KEY || 'AIzaSyAZjvD4bM-c6klrcrnFCpiBLSoSz_goPQ4'
+  
+  // DB에서 저장된 Gemini API Key 가져오기
+  const savedApiKey = await db.prepare('SELECT value FROM settings WHERE key = ?').bind('gemini_api_key').first() as any
+  const geminiApiKey = savedApiKey?.value || c.env.GEMINI_API_KEY || ''
+  
+  if (!geminiApiKey) {
+    return c.json({ error: 'Gemini API Key가 설정되지 않았습니다. 관리자 페이지에서 API Key를 설정해주세요.' }, 400)
+  }
   
   try {
     // Get analysis data
@@ -840,7 +847,10 @@ app.post('/api/cron/auto-update', async (c) => {
   }
   
   const db = c.env.DB
-  const geminiApiKey = c.env.GEMINI_API_KEY || 'AIzaSyAZjvD4bM-c6klrcrnFCpiBLSoSz_goPQ4'
+  
+  // DB에서 저장된 Gemini API Key 가져오기
+  const savedApiKey = await db.prepare('SELECT value FROM settings WHERE key = ?').bind('gemini_api_key').first() as any
+  const geminiApiKey = savedApiKey?.value || c.env.GEMINI_API_KEY || ''
   
   try {
     // 1. 동행복권에서 최신 당첨번호 가져오기
@@ -1212,6 +1222,124 @@ app.get('/api/admin/leads/stats', async (c) => {
 })
 
 // ============================
+// Admin Settings API (Gemini API Key 등)
+// ============================
+
+// 설정 저장
+app.post('/api/admin/settings', async (c) => {
+  const user = c.get('user')
+  
+  if (!user || user.subscription_type !== 'admin') {
+    return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  }
+  
+  const db = c.env.DB
+  const { key, value } = await c.req.json()
+  
+  if (!key || !value) {
+    return c.json({ error: '키와 값이 필요합니다.' }, 400)
+  }
+  
+  // settings 테이블 생성 (없으면)
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run()
+  
+  // 설정 저장 (upsert)
+  await db.prepare(`
+    INSERT INTO settings (key, value, updated_at) 
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = CURRENT_TIMESTAMP
+  `).bind(key, value, value).run()
+  
+  return c.json({ success: true, message: '설정이 저장되었습니다.' })
+})
+
+// 설정 조회
+app.get('/api/admin/settings/:key', async (c) => {
+  const user = c.get('user')
+  
+  if (!user || user.subscription_type !== 'admin') {
+    return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  }
+  
+  const db = c.env.DB
+  const key = c.req.param('key')
+  
+  const setting = await db.prepare('SELECT value FROM settings WHERE key = ?').bind(key).first() as any
+  
+  return c.json({ 
+    key,
+    value: setting?.value || null,
+    exists: !!setting
+  })
+})
+
+// Gemini API Key 테스트
+app.post('/api/admin/test-gemini', async (c) => {
+  const user = c.get('user')
+  
+  if (!user || user.subscription_type !== 'admin') {
+    return c.json({ error: '관리자 권한이 필요합니다.' }, 403)
+  }
+  
+  const { api_key } = await c.req.json()
+  
+  if (!api_key) {
+    return c.json({ error: 'API Key가 필요합니다.' }, 400)
+  }
+  
+  try {
+    // Gemini API 테스트 호출
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${api_key}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: '안녕하세요. 연결 테스트입니다. "연결 성공"이라고만 답변해주세요.' }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 50 }
+        })
+      }
+    )
+    
+    const data = await response.json() as any
+    
+    if (data.error) {
+      return c.json({ 
+        success: false, 
+        error: data.error.message || 'API 오류',
+        status: data.error.status || 'UNKNOWN'
+      })
+    }
+    
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text
+    
+    if (text) {
+      return c.json({ 
+        success: true, 
+        message: '✅ Gemini API 연결 성공!',
+        response: text.trim()
+      })
+    } else {
+      return c.json({ 
+        success: false, 
+        error: '응답을 받지 못했습니다.'
+      })
+    }
+  } catch (error: any) {
+    return c.json({ 
+      success: false, 
+      error: error.message || '연결 실패'
+    })
+  }
+})
+
+// ============================
 // Admin Routes
 // ============================
 
@@ -1405,6 +1533,36 @@ app.get('/admin', async (c) => {
         </div>
       </div>
       
+      <!-- Gemini API Key 설정 섹션 -->
+      <div class="glass rounded-2xl p-6 mb-8">
+        <h3 class="text-xl font-bold mb-4"><i class="fas fa-key text-yellow-400 mr-2"></i>Gemini API Key 설정</h3>
+        <div class="space-y-4">
+          <div class="flex items-center gap-2 mb-2">
+            <span id="api-status" class="px-3 py-1 rounded-full text-sm bg-gray-700">⏳ 확인 중...</span>
+            <span id="api-status-text" class="text-gray-400 text-sm"></span>
+          </div>
+          <div class="flex gap-4">
+            <input type="password" id="gemini-api-key" placeholder="AIza... (Gemini API Key 입력)" 
+                   class="flex-1 px-4 py-3 rounded-lg bg-white/10 border border-gray-700 focus:border-yellow-500 focus:outline-none">
+            <button onclick="toggleApiKeyVisibility()" class="px-4 py-3 rounded-lg bg-white/10 hover:bg-white/20 border border-gray-700">
+              <i id="eye-icon" class="fas fa-eye"></i>
+            </button>
+          </div>
+          <div class="flex gap-4">
+            <button onclick="testGeminiApi()" class="flex-1 py-3 rounded-lg bg-blue-500/20 border border-blue-500 hover:bg-blue-500/30 font-bold">
+              <i class="fas fa-plug mr-2"></i>연결 테스트
+            </button>
+            <button onclick="saveGeminiApiKey()" class="flex-1 py-3 rounded-lg bg-green-500/20 border border-green-500 hover:bg-green-500/30 font-bold">
+              <i class="fas fa-save mr-2"></i>저장
+            </button>
+          </div>
+          <p class="text-gray-500 text-sm">
+            <i class="fas fa-info-circle mr-1"></i>
+            Google AI Studio에서 API Key 발급: <a href="https://aistudio.google.com/apikey" target="_blank" class="text-blue-400 hover:underline">https://aistudio.google.com/apikey</a>
+          </p>
+        </div>
+      </div>
+      
       <!-- Action Buttons -->
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
         <button onclick="exportLeads()" class="glass rounded-xl p-6 hover:bg-white/10 transition text-left">
@@ -1523,7 +1681,147 @@ app.get('/admin', async (c) => {
       document.getElementById('admin-dashboard').classList.remove('hidden');
       loadStats();
       loadLeads();
+      loadGeminiApiKey();
     }
+    
+    // ========== Gemini API Key 관련 함수들 ==========
+    async function loadGeminiApiKey() {
+      try {
+        const response = await fetch('/api/admin/settings/gemini_api_key', {
+          headers: { 'Authorization': 'Bearer ' + adminToken }
+        });
+        const data = await response.json();
+        
+        if (data.exists && data.value) {
+          document.getElementById('gemini-api-key').value = data.value;
+          updateApiStatus('configured', '✅ API Key 설정됨');
+        } else {
+          updateApiStatus('not-configured', '❌ API Key 미설정');
+        }
+      } catch (e) {
+        updateApiStatus('error', '⚠️ 상태 확인 실패');
+      }
+    }
+    
+    function updateApiStatus(status, text) {
+      const statusEl = document.getElementById('api-status');
+      const textEl = document.getElementById('api-status-text');
+      
+      statusEl.className = 'px-3 py-1 rounded-full text-sm';
+      
+      switch(status) {
+        case 'configured':
+          statusEl.classList.add('bg-green-500/20', 'text-green-400');
+          statusEl.textContent = '✅ 연결됨';
+          break;
+        case 'not-configured':
+          statusEl.classList.add('bg-red-500/20', 'text-red-400');
+          statusEl.textContent = '❌ 미설정';
+          break;
+        case 'testing':
+          statusEl.classList.add('bg-yellow-500/20', 'text-yellow-400');
+          statusEl.textContent = '🔄 테스트 중...';
+          break;
+        case 'success':
+          statusEl.classList.add('bg-green-500/20', 'text-green-400');
+          statusEl.textContent = '✅ 연결 성공';
+          break;
+        case 'error':
+          statusEl.classList.add('bg-red-500/20', 'text-red-400');
+          statusEl.textContent = '❌ 연결 실패';
+          break;
+        default:
+          statusEl.classList.add('bg-gray-700');
+          statusEl.textContent = '⏳ 확인 중...';
+      }
+      
+      textEl.textContent = text || '';
+    }
+    
+    function toggleApiKeyVisibility() {
+      const input = document.getElementById('gemini-api-key');
+      const icon = document.getElementById('eye-icon');
+      
+      if (input.type === 'password') {
+        input.type = 'text';
+        icon.classList.remove('fa-eye');
+        icon.classList.add('fa-eye-slash');
+      } else {
+        input.type = 'password';
+        icon.classList.remove('fa-eye-slash');
+        icon.classList.add('fa-eye');
+      }
+    }
+    
+    async function testGeminiApi() {
+      const apiKey = document.getElementById('gemini-api-key').value.trim();
+      
+      if (!apiKey) {
+        showToast('API Key를 입력해주세요.', 'error');
+        return;
+      }
+      
+      updateApiStatus('testing', '연결 테스트 중...');
+      
+      try {
+        const response = await fetch('/api/admin/test-gemini', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + adminToken 
+          },
+          body: JSON.stringify({ api_key: apiKey })
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+          updateApiStatus('success', data.response || '연결 성공');
+          showToast('✅ Gemini API 연결 성공!', 'success');
+        } else {
+          updateApiStatus('error', data.error || '연결 실패');
+          showToast('❌ ' + (data.error || '연결 실패'), 'error');
+        }
+      } catch (e) {
+        updateApiStatus('error', '서버 오류');
+        showToast('서버 오류', 'error');
+      }
+    }
+    
+    async function saveGeminiApiKey() {
+      const apiKey = document.getElementById('gemini-api-key').value.trim();
+      
+      if (!apiKey) {
+        showToast('API Key를 입력해주세요.', 'error');
+        return;
+      }
+      
+      if (!apiKey.startsWith('AIza')) {
+        showToast('올바른 Gemini API Key 형식이 아닙니다. (AIza...로 시작)', 'error');
+        return;
+      }
+      
+      try {
+        const response = await fetch('/api/admin/settings', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + adminToken 
+          },
+          body: JSON.stringify({ key: 'gemini_api_key', value: apiKey })
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+          updateApiStatus('configured', '저장됨');
+          showToast('✅ API Key가 저장되었습니다!', 'success');
+        } else {
+          showToast('❌ 저장 실패: ' + (data.error || '알 수 없는 오류'), 'error');
+        }
+      } catch (e) {
+        showToast('서버 오류', 'error');
+      }
+    }
+    // ========== Gemini API Key 관련 함수들 끝 ==========
     
     async function loadStats() {
       try {
